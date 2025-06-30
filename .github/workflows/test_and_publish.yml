@@ -31,9 +31,9 @@ jobs:
         - macos: py311-test-mpl38
         - windows: py311-test-mpl38
         # Test newest configurations
-        - linux: py313-test-mpl310
-        - macos: py313-test-mpl310
-        - windows: py313-test-mpl310
+        - linux: py313-test-mpl310-xdist
+        - macos: py313-test-mpl310-xdist
+        - windows: py313-test-mpl310-xdist
         # Test intermediate SPEC 0 configurations on Linux
         - linux: py311-test-mpl39
         - linux: py312-test-mpl39

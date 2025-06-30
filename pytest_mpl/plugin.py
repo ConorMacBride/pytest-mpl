@@ -31,6 +31,7 @@
 import io
 import os
 import json
+import uuid
 import shutil
 import hashlib
 import logging
@@ -216,6 +217,12 @@ def pytest_addoption(parser):
     parser.addini(option, help=msg)
 
 
+class XdistPlugin:
+    def pytest_configure_node(self, node):
+        node.workerinput["pytest_mpl_uid"] = node.config.pytest_mpl_uid
+        node.workerinput["pytest_mpl_results_dir"] = node.config.pytest_mpl_results_dir
+
+
 def pytest_configure(config):
 
     config.addinivalue_line(
@@ -288,12 +295,20 @@ def pytest_configure(config):
             if not _hash_library_from_cli:
                 hash_library = os.path.abspath(hash_library)
 
+        if not hasattr(config, "workerinput"):
+            uid = uuid.uuid4().hex
+            results_dir_path = results_dir or tempfile.mkdtemp()
+            config.pytest_mpl_uid = uid
+            config.pytest_mpl_results_dir = results_dir_path
+
+        if config.pluginmanager.hasplugin("xdist"):
+            config.pluginmanager.register(XdistPlugin(), name="pytest_mpl_xdist_plugin")
+
         plugin = ImageComparison(
             config,
             baseline_dir=baseline_dir,
             baseline_relative_dir=baseline_relative_dir,
             generate_dir=generate_dir,
-            results_dir=results_dir,
             hash_library=hash_library,
             generate_hash_library=generate_hash_lib,
             generate_summary=generate_summary,
@@ -356,7 +371,6 @@ class ImageComparison:
         baseline_dir=None,
         baseline_relative_dir=None,
         generate_dir=None,
-        results_dir=None,
         hash_library=None,
         generate_hash_library=None,
         generate_summary=None,
@@ -372,7 +386,7 @@ class ImageComparison:
         self.baseline_dir = baseline_dir
         self.baseline_relative_dir = path_is_not_none(baseline_relative_dir)
         self.generate_dir = path_is_not_none(generate_dir)
-        self.results_dir = path_is_not_none(results_dir)
+        self.results_dir = None
         self.hash_library = path_is_not_none(hash_library)
         self._hash_library_from_cli = _hash_library_from_cli  # for backwards compatibility
         self.generate_hash_library = path_is_not_none(generate_hash_library)
@@ -394,11 +408,6 @@ class ImageComparison:
         self.deterministic = deterministic
         self.default_backend = default_backend
 
-        # Generate the containing dir for all test results
-        if not self.results_dir:
-            self.results_dir = Path(tempfile.mkdtemp(dir=self.results_dir))
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-
         # Decide what to call the downloadable results hash library
         if self.hash_library is not None:
             self.results_hash_library_name = self.hash_library.name
@@ -410,6 +419,14 @@ class ImageComparison:
         self._test_results = {}
         self._test_stats = None
         self.return_value = {}
+
+    def pytest_sessionstart(self, session):
+        config = session.config
+        if hasattr(config, "workerinput"):
+            config.pytest_mpl_uid = config.workerinput["pytest_mpl_uid"]
+            config.pytest_mpl_results_dir = config.workerinput["pytest_mpl_results_dir"]
+        self.results_dir = Path(config.pytest_mpl_results_dir)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def get_logger(self):
         # configure a separate logger for this pluggin which is independent
@@ -933,15 +950,20 @@ class ImageComparison:
                     result._excinfo = (type(e), e, e.__traceback__)
 
     def generate_summary_json(self):
-        json_file = self.results_dir / 'results.json'
+        filename = "results.json"
+        if hasattr(self.config, "workerinput"):
+            worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+            filename = f"results-xdist-{self.config.pytest_mpl_uid}-{worker_id}.json"
+        json_file = self.results_dir / filename
         with open(json_file, 'w') as f:
             json.dump(self._test_results, f, indent=2)
         return json_file
 
-    def pytest_unconfigure(self, config):
+    def pytest_sessionfinish(self, session):
         """
         Save out the hash library at the end of the run.
         """
+        config = session.config
         result_hash_library = self.results_dir / (self.results_hash_library_name or "temp.json")
         if self.generate_hash_library is not None:
             hash_library_path = Path(config.rootdir) / self.generate_hash_library
@@ -960,10 +982,24 @@ class ImageComparison:
                     json.dump(result_hashes, fp, indent=2)
 
         if self.generate_summary:
+            try:
+                import xdist
+                is_xdist_controller = xdist.is_xdist_controller(session)
+                is_xdist_worker = xdist.is_xdist_worker(session)
+            except ImportError:
+                is_xdist_controller = False
+                is_xdist_worker = False
             kwargs = {}
             if 'json' in self.generate_summary:
+                if is_xdist_controller:
+                    uid = config.pytest_mpl_uid
+                    for worker_results in self.results_dir.glob(f"results-xdist-{uid}-*.json"):
+                        with worker_results.open() as f:
+                            self._test_results.update(json.load(f))
                 summary = self.generate_summary_json()
                 print(f"A JSON report can be found at: {summary}")
+            if is_xdist_worker:
+                return
             if result_hash_library.exists():  # link to it in the HTML
                 kwargs["hash_library"] = result_hash_library.name
             if 'html' in self.generate_summary:

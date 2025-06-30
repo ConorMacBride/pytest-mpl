@@ -206,6 +206,19 @@ def test_html(tmp_path):
     assert (tmp_path / 'results' / 'styles.css').exists()
 
 
+@pytest.mark.parametrize("num_workers", [0, 1, 2])
+def test_html_xdist(request, tmp_path, num_workers):
+    if not request.config.pluginmanager.hasplugin("xdist"):
+        pytest.skip("Skipping: pytest-xdist is not installed")
+    run_subtest('test_results_always', tmp_path,
+                [HASH_LIBRARY_FLAG, BASELINE_IMAGES_FLAG_ABS, f"-n{num_workers}"], summaries=['html'],
+                has_result_hashes=True)
+    assert (tmp_path / 'results' / 'fig_comparison.html').exists()
+    assert (tmp_path / 'results' / 'extra.js').exists()
+    assert (tmp_path / 'results' / 'styles.css').exists()
+    assert len(list((tmp_path / 'results').glob('results-xdist-*-*.json'))) == num_workers
+
+
 def test_html_hashes_only(tmp_path):
     run_subtest('test_html_hashes_only', tmp_path,
                 [HASH_LIBRARY_FLAG, *HASH_COMPARISON_MODE],
